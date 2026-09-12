@@ -25,9 +25,14 @@ func (r *TradeOrderRepository) Transaction(ctx context.Context, fn func(txCtx co
 	return Transaction(ctx, r.db, fn)
 }
 
-// Create inserts a new trade order.
+// Create inserts a new trade order. The database active-order unique key
+// guarantees that two concurrent creates for the same product and buyer
+// cannot both succeed; the losing insert comes back as util.ErrConflict.
 func (r *TradeOrderRepository) Create(ctx context.Context, o *model.TradeOrder) error {
-	return db(ctx, r.db).Create(o).Error
+	if err := db(ctx, r.db).Create(o).Error; err != nil {
+		return mapTradeOrderCreateError(err)
+	}
+	return nil
 }
 
 // FindByID returns a trade order by id.

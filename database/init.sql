@@ -63,10 +63,14 @@ CREATE TABLE IF NOT EXISTS trade_orders (
   seller_confirmed_at DATETIME(3) NULL,
   completed_at DATETIME(3) NULL,
   created_at DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
+  active_order_key VARCHAR(64) GENERATED ALWAYS AS
+    (CASE WHEN status IN ('pending','confirmed')
+          THEN CONCAT_WS(':', product_id, buyer_id) END) VIRTUAL,
   INDEX idx_trade_orders_product (product_id),
   INDEX idx_trade_orders_buyer (buyer_id),
   INDEX idx_trade_orders_seller (seller_id),
-  INDEX idx_trade_orders_status (status)
+  INDEX idx_trade_orders_status (status),
+  UNIQUE KEY uq_trade_orders_active (active_order_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS reviews (

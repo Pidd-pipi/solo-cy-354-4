@@ -42,6 +42,15 @@ func (f *fakeOrderRepo) snapshot() map[uint]*model.TradeOrder {
 func (f *fakeOrderRepo) Create(_ context.Context, o *model.TradeOrder) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// Mirror the database uq_trade_orders_active key: one active (pending or
+	// confirmed) order per (product, buyer). Finished/cancelled rows do not
+	// collide. Holding the lock across check+insert makes it a real race test.
+	for _, e := range f.orders {
+		if e.ProductID == o.ProductID && e.BuyerID == o.BuyerID &&
+			(e.Status == constants.TradeStatusPending || e.Status == constants.TradeStatusConfirmed) {
+			return util.ErrConflict
+		}
+	}
 	o.ID = f.nextID
 	f.nextID++
 	cp := *o
@@ -518,5 +527,131 @@ func TestSellerConfirmProductWriteFailureRollsBack(t *testing.T) {
 	// The transition cannot be applied twice.
 	if _, err := svc.SellerConfirm(context.Background(), 200, order.ID); appStatus(t, err) != 409 {
 		t.Fatalf("repeat seller confirm: got %d, want 409", appStatus(t, err))
+	}
+}
+
+// TestCreateConcurrentOnlyOneSucceeds verifies the race fix: many concurrent
+// create requests for the same product and buyer must result in exactly one
+// pending order; every losing request is a 409 conflict with no extra rows.
+func TestCreateConcurrentOnlyOneSucceeds(t *testing.T) {
+	const goroutines = 16
+	for iteration := 0; iteration < 20; iteration++ {
+		svc, orders, _ := newOrderService(t)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var statMu sync.Mutex
+		successes, conflicts, others := 0, 0, 0
+		wg.Add(goroutines)
+		for i := 0; i < goroutines; i++ {
+			go func() {
+				defer wg.Done()
+				<-start
+				_, err := svc.Create(context.Background(), &model.User{ID: 100}, &dto.CreateTradeOrderRequest{ProductID: 1})
+				statMu.Lock()
+				defer statMu.Unlock()
+				switch {
+				case err == nil:
+					successes++
+				case appStatus(t, err) == 409:
+					conflicts++
+				default:
+					others++
+					t.Errorf("iteration %d: unexpected create error: %v", iteration, err)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		if successes != 1 || conflicts != goroutines-1 || others != 0 {
+			t.Fatalf("iteration %d: successes=%d conflicts=%d others=%d, want 1/%d/0",
+				iteration, successes, conflicts, others, goroutines-1)
+		}
+		if len(orders.orders) != 1 {
+			t.Fatalf("iteration %d: stored orders = %d, want exactly 1", iteration, len(orders.orders))
+		}
+		var pendingCount int
+		for _, o := range orders.orders {
+			if o.Status == constants.TradeStatusPending {
+				pendingCount++
+			}
+		}
+		if pendingCount != 1 {
+			t.Fatalf("iteration %d: pending orders = %d, want 1", iteration, pendingCount)
+		}
+	}
+}
+
+// TestCreateAgainAfterCancel preserves the existing rule: once the active
+// order is cancelled the (product, buyer) key frees up and a new order may be
+// placed; the second order is a distinct pending row.
+func TestCreateAgainAfterCancel(t *testing.T) {
+	svc, orders, _ := newOrderService(t)
+	buyer := &model.User{ID: 100}
+
+	first, err := svc.Create(context.Background(), buyer, &dto.CreateTradeOrderRequest{ProductID: 1})
+	if err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	if _, err := svc.Cancel(context.Background(), 100, first.ID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+
+	second, err := svc.Create(context.Background(), buyer, &dto.CreateTradeOrderRequest{ProductID: 1})
+	if err != nil {
+		t.Fatalf("re-order after cancel: %v", err)
+	}
+	if second.ID == first.ID || second.Status != constants.TradeStatusPending {
+		t.Fatalf("re-order must be a new pending order: first=%d second=%+v", first.ID, second)
+	}
+	if len(orders.orders) != 2 {
+		t.Fatalf("stored orders = %d, want 2 (one cancelled, one pending)", len(orders.orders))
+	}
+
+	// While the new order stays active another duplicate is still rejected.
+	if _, err := svc.Create(context.Background(), buyer, &dto.CreateTradeOrderRequest{ProductID: 1}); appStatus(t, err) != 409 {
+		t.Fatalf("duplicate on re-ordered product: got %d, want 409", appStatus(t, err))
+	}
+}
+
+// TestCreateAgainAfterCompletion keeps post-completion behaviour unchanged:
+// the active-order key frees when the order completes, and rejection then
+// comes from the existing on-sale product rule. A fresh on-sale product is
+// still orderable by the same buyer.
+func TestCreateAgainAfterCompletion(t *testing.T) {
+	svc, orders, products := newOrderService(t)
+	buyer := &model.User{ID: 100}
+	order, err := svc.Create(context.Background(), buyer, &dto.CreateTradeOrderRequest{ProductID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.BuyerConfirm(context.Background(), 100, order.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SellerConfirm(context.Background(), 200, order.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Product 1 is sold now: the completed order no longer occupies the key,
+	// but the unchanged on-sale rule rejects the request with 409.
+	if _, err := svc.Create(context.Background(), buyer, &dto.CreateTradeOrderRequest{ProductID: 1}); appStatus(t, err) != 409 {
+		t.Fatalf("re-order sold product: got %d, want 409", appStatus(t, err))
+	}
+	if len(orders.orders) != 1 {
+		t.Fatalf("re-order attempt after completion wrote %d orders, want 1", len(orders.orders))
+	}
+
+	// A different product being sold by the same seller is independently
+	// orderable by the same buyer.
+	other := &model.Product{SellerID: 200, Title: "另一本书", Price: 5, Category: constants.ProductCategoryBooks, Condition: "全新", Campus: "东校区", TradeLocation: "东门", Status: constants.ProductStatusOnSale}
+	if err := products.Create(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	again, err := svc.Create(context.Background(), buyer, &dto.CreateTradeOrderRequest{ProductID: other.ID})
+	if err != nil {
+		t.Fatalf("order a different on-sale product: %v", err)
+	}
+	if again.Status != constants.TradeStatusPending {
+		t.Fatalf("new order status = %q, want pending", again.Status)
 	}
 }

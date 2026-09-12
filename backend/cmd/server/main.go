@@ -13,6 +13,7 @@ import (
 
 	"github.com/lp/campus-market/internal/config"
 	"github.com/lp/campus-market/internal/model"
+	"github.com/lp/campus-market/internal/repository"
 	"github.com/lp/campus-market/internal/router"
 	"github.com/lp/campus-market/internal/util"
 	"gorm.io/driver/mysql"
@@ -43,6 +44,13 @@ func main() {
 		&model.TradeOrder{}, &model.Review{}, &model.BookExchange{},
 	); err != nil {
 		logger.Error("auto migrate failed", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+
+	// Install the database-level guard that prevents two concurrent create
+	// requests from producing duplicate active orders for one product/buyer.
+	if err := repository.EnsureTradeOrderActiveKey(db); err != nil {
+		logger.Error("trade order active key migrate failed", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
 

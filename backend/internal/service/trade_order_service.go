@@ -64,7 +64,13 @@ func (s *TradeOrderService) Create(ctx context.Context, buyer *model.User, req *
 		Status: tradestate.Initial(),
 	}
 	if err := s.orders.Create(ctx, order); err != nil {
-		return nil, util.WrapAppError(fmt.Errorf("trade_order[buyer=%d] create: %w", buyer.ID, err), 500, constants.CodeInternalError, constants.MsgInternalError)
+		// The database active-order unique key is the race-proof backstop:
+		// a concurrent request that passed the lookup first wins the one
+		// active order and this insert is rejected as a duplicate.
+		if errors.Is(err, util.ErrConflict) {
+			return nil, util.NewAppError(409, constants.CodeConflict, "您已对该商品下单", nil)
+		}
+		return nil, util.WrapAppError(fmt.Errorf("trade_order[id=? product=%d buyer=%d] create: %w", req.ProductID, buyer.ID, err), 500, constants.CodeInternalError, constants.MsgInternalError)
 	}
 	s.logger.Info(fmt.Sprintf(constants.LogTradeOrderCreateSuccess, order.ID, req.ProductID))
 	return order, nil
