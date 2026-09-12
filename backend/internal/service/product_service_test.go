@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"testing"
 
 	"github.com/lp/campus-market/internal/constants"
@@ -12,8 +13,10 @@ import (
 )
 
 type fakeProductRepo struct {
-	products map[uint]*model.Product
-	nextID   uint
+	mu              sync.Mutex
+	products        map[uint]*model.Product
+	nextID          uint
+	updateStatusErr error // when non-nil, UpdateStatus fails (write fault injection)
 }
 
 func newFakeProductRepo() *fakeProductRepo {
@@ -21,6 +24,8 @@ func newFakeProductRepo() *fakeProductRepo {
 }
 
 func (f *fakeProductRepo) Create(_ context.Context, p *model.Product) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	p.ID = f.nextID
 	f.nextID++
 	f.products[p.ID] = p
@@ -28,6 +33,8 @@ func (f *fakeProductRepo) Create(_ context.Context, p *model.Product) error {
 }
 
 func (f *fakeProductRepo) FindByID(_ context.Context, id uint) (*model.Product, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if p, ok := f.products[id]; ok {
 		cp := *p
 		return &cp, nil
@@ -53,9 +60,13 @@ func (f *fakeProductRepo) List(_ context.Context, category, campus, keyword, sta
 }
 
 func (f *fakeProductRepo) UpdateStatus(_ context.Context, id uint, status string) error {
-	_, err := f.FindByID(context.Background(), id)
-	if err != nil {
-		return err
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.products[id]; !ok {
+		return util.ErrNotFound
+	}
+	if f.updateStatusErr != nil {
+		return f.updateStatusErr
 	}
 	f.products[id].Status = status
 	return nil

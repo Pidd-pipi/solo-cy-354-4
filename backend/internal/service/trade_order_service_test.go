@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,8 +15,12 @@ import (
 	"github.com/lp/campus-market/internal/util"
 )
 
-// fakeOrderRepo is an in-memory OrderRepository for lifecycle tests.
+// fakeOrderRepo is an in-memory OrderRepository for lifecycle tests. The
+// mutex makes Transition an atomic compare-and-set (mirroring the SQL
+// WHERE status = ? guard) so concurrent calls can race deterministically,
+// and Transaction snapshots/restores state like a real DB rollback.
 type fakeOrderRepo struct {
+	mu        sync.Mutex
 	orders    map[uint]*model.TradeOrder
 	nextID    uint
 	lookupErr error // when non-nil, FindByProductBuyerStatuses fails
@@ -25,7 +30,18 @@ func newFakeOrderRepo() *fakeOrderRepo {
 	return &fakeOrderRepo{orders: map[uint]*model.TradeOrder{}, nextID: 1}
 }
 
+func (f *fakeOrderRepo) snapshot() map[uint]*model.TradeOrder {
+	cp := make(map[uint]*model.TradeOrder, len(f.orders))
+	for id, o := range f.orders {
+		row := *o
+		cp[id] = &row
+	}
+	return cp
+}
+
 func (f *fakeOrderRepo) Create(_ context.Context, o *model.TradeOrder) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	o.ID = f.nextID
 	f.nextID++
 	cp := *o
@@ -34,6 +50,8 @@ func (f *fakeOrderRepo) Create(_ context.Context, o *model.TradeOrder) error {
 }
 
 func (f *fakeOrderRepo) FindByID(_ context.Context, id uint) (*model.TradeOrder, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if o, ok := f.orders[id]; ok {
 		cp := *o
 		return &cp, nil
@@ -42,6 +60,8 @@ func (f *fakeOrderRepo) FindByID(_ context.Context, id uint) (*model.TradeOrder,
 }
 
 func (f *fakeOrderRepo) FindByProductBuyerStatuses(_ context.Context, productID, buyerID uint, statuses []string) (*model.TradeOrder, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.lookupErr != nil {
 		return nil, f.lookupErr
 	}
@@ -60,6 +80,8 @@ func (f *fakeOrderRepo) FindByProductBuyerStatuses(_ context.Context, productID,
 }
 
 func (f *fakeOrderRepo) ListByUser(_ context.Context, userID uint, _, _ int) ([]model.TradeOrder, int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	var out []model.TradeOrder
 	for _, o := range f.orders {
 		if o.BuyerID == userID || o.SellerID == userID {
@@ -70,6 +92,8 @@ func (f *fakeOrderRepo) ListByUser(_ context.Context, userID uint, _, _ int) ([]
 }
 
 func (f *fakeOrderRepo) Transition(_ context.Context, id uint, expectStatus, toStatus string, columns map[string]interface{}) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	o, ok := f.orders[id]
 	if !ok {
 		return util.ErrNotFound
@@ -95,8 +119,19 @@ func (f *fakeOrderRepo) Transition(_ context.Context, id uint, expectStatus, toS
 	return nil
 }
 
+// Transaction mirrors a database transaction: mutations commit on success and
+// are rolled back to the entry snapshot on error.
 func (f *fakeOrderRepo) Transaction(ctx context.Context, fn func(txCtx context.Context) error) error {
-	return fn(ctx)
+	f.mu.Lock()
+	snapshot := f.snapshot()
+	f.mu.Unlock()
+	if err := fn(ctx); err != nil {
+		f.mu.Lock()
+		f.orders = snapshot
+		f.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func newOrderService(t *testing.T) (*TradeOrderService, *fakeOrderRepo, *fakeProductRepo) {
@@ -325,5 +360,163 @@ func TestTradeOrderCancelLifecycle(t *testing.T) {
 	order4, _ := svc4.Create(context.Background(), &model.User{ID: 100}, &dto.CreateTradeOrderRequest{ProductID: 1})
 	if _, err := svc4.Cancel(context.Background(), 999, order4.ID); appStatus(t, err) != 403 {
 		t.Fatalf("stranger cancel: got %d, want 403", appStatus(t, err))
+	}
+}
+
+// TestCreateDuplicateLookupFailureNoOrder is a standalone, repeatable test
+// for the triage rule: when the duplicate-order lookup itself fails, creation
+// must abort with a 500 and must not insert an order.
+func TestCreateDuplicateLookupFailureNoOrder(t *testing.T) {
+	svc, orders, _ := newOrderService(t)
+	dbErr := errors.New("lookup: connection reset")
+	orders.lookupErr = dbErr
+
+	const tries = 5
+	for i := 0; i < tries; i++ {
+		before := len(orders.orders)
+		_, err := svc.Create(context.Background(), &model.User{ID: 100}, &dto.CreateTradeOrderRequest{ProductID: 1})
+		if appStatus(t, err) != 500 {
+			t.Fatalf("attempt %d: got status %d, want 500 (err=%v)", i+1, appStatus(t, err), err)
+		}
+		if !strings.Contains(err.Error(), "product=1") || !strings.Contains(err.Error(), "buyer=100") {
+			t.Fatalf("attempt %d: error must carry product and buyer ids: %v", i+1, err)
+		}
+		if !errors.Is(err, dbErr) {
+			t.Fatalf("attempt %d: underlying lookup error must be preserved: %v", i+1, err)
+		}
+		if got := len(orders.orders); got != before {
+			t.Fatalf("attempt %d: order count changed %d -> %d", i+1, before, got)
+		}
+	}
+	if got := len(orders.orders); got != 0 {
+		t.Fatalf("failed lookups created %d orders, want 0", got)
+	}
+
+	// The product stays on sale (nothing was reserved) and a healthy lookup
+	// afterwards creates exactly one order.
+	orders.lookupErr = nil
+	order, err := svc.Create(context.Background(), &model.User{ID: 100}, &dto.CreateTradeOrderRequest{ProductID: 1})
+	if err != nil {
+		t.Fatalf("create after recovery failed: %v", err)
+	}
+	if order.Status != constants.TradeStatusPending || len(orders.orders) != 1 {
+		t.Fatalf("post-recovery state wrong: status=%q orders=%d", order.Status, len(orders.orders))
+	}
+}
+
+// TestBuyerConfirmConcurrentOnlyOneSucceeds is a standalone, repeatable test:
+// the same buyer confirming one pending order concurrently any number of
+// times must yield exactly one success; every other call is rejected as 409
+// and the order ends in confirmed with exactly one confirmation timestamp.
+func TestBuyerConfirmConcurrentOnlyOneSucceeds(t *testing.T) {
+	const goroutines = 16
+	for iteration := 0; iteration < 20; iteration++ {
+		svc, orders, _ := newOrderService(t)
+		order, err := svc.Create(context.Background(), &model.User{ID: 100}, &dto.CreateTradeOrderRequest{ProductID: 1})
+		if err != nil {
+			t.Fatalf("iteration %d: create: %v", iteration, err)
+		}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var okMu sync.Mutex
+		successes, conflicts := 0, 0
+		wg.Add(goroutines)
+		for i := 0; i < goroutines; i++ {
+			go func() {
+				defer wg.Done()
+				<-start
+				_, err := svc.BuyerConfirm(context.Background(), 100, order.ID)
+				okMu.Lock()
+				defer okMu.Unlock()
+				switch {
+				case err == nil:
+					successes++
+				case appStatus(t, err) == 409:
+					conflicts++
+				default:
+					t.Errorf("iteration %d: unexpected confirm error: %v", iteration, err)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		if successes != 1 {
+			t.Fatalf("iteration %d: successes=%d, want exactly 1 (conflicts=%d)", iteration, successes, conflicts)
+		}
+		if conflicts != goroutines-1 {
+			t.Fatalf("iteration %d: conflicts=%d, want %d", iteration, conflicts, goroutines-1)
+		}
+		stored := orders.orders[order.ID]
+		if stored.Status != constants.TradeStatusConfirmed || stored.BuyerConfirmedAt == nil {
+			t.Fatalf("iteration %d: stored order wrong after race: %+v", iteration, stored)
+		}
+		if stored.SellerConfirmedAt != nil || stored.CompletedAt != nil {
+			t.Fatalf("iteration %d: buyer confirm stamped unrelated timestamps: %+v", iteration, stored)
+		}
+	}
+}
+
+// TestSellerConfirmProductWriteFailureRollsBack is a standalone, repeatable
+// test: if writing the product status fails inside the seller-confirm
+// transaction, the order must stay confirmed (not completed), timestamps
+// must not be persisted and the caller receives a 500. Once the write heals,
+// the same order can complete normally exactly once.
+func TestSellerConfirmProductWriteFailureRollsBack(t *testing.T) {
+	svc, orders, products := newOrderService(t)
+	order, err := svc.Create(context.Background(), &model.User{ID: 100}, &dto.CreateTradeOrderRequest{ProductID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.BuyerConfirm(context.Background(), 100, order.ID); err != nil {
+		t.Fatalf("buyer confirm: %v", err)
+	}
+	stored := orders.orders[order.ID]
+	if stored.Status != constants.TradeStatusConfirmed {
+		t.Fatalf("precondition: status=%q, want confirmed", stored.Status)
+	}
+
+	writeErr := errors.New("product update: disk full")
+	products.updateStatusErr = writeErr
+	_, err = svc.SellerConfirm(context.Background(), 200, order.ID)
+	if appStatus(t, err) != 500 {
+		t.Fatalf("got status %d, want 500 (err=%v)", appStatus(t, err), err)
+	}
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("underlying product write error must be preserved: %v", err)
+	}
+
+	stored = orders.orders[order.ID]
+	if stored.Status != constants.TradeStatusConfirmed {
+		t.Fatalf("order status after failed product write = %q, want confirmed (rollback)", stored.Status)
+	}
+	if stored.SellerConfirmedAt != nil || stored.CompletedAt != nil {
+		t.Fatalf("rollback must clear confirmation timestamps: %+v", stored)
+	}
+	if products.products[1].Status != constants.ProductStatusOnSale {
+		t.Fatalf("product status = %q, want on_sale", products.products[1].Status)
+	}
+
+	// Healed write: the still-confirmed order completes once, atomically.
+	products.updateStatusErr = nil
+	completed, err := svc.SellerConfirm(context.Background(), 200, order.ID)
+	if err != nil {
+		t.Fatalf("seller confirm after recovery: %v", err)
+	}
+	if completed.Status != constants.TradeStatusCompleted {
+		t.Fatalf("status = %q, want completed", completed.Status)
+	}
+	stored = orders.orders[order.ID]
+	if stored.SellerConfirmedAt == nil || stored.CompletedAt == nil {
+		t.Fatalf("completion must stamp seller/completed times: %+v", stored)
+	}
+	if products.products[1].Status != constants.ProductStatusSold {
+		t.Fatalf("product status = %q, want sold", products.products[1].Status)
+	}
+
+	// The transition cannot be applied twice.
+	if _, err := svc.SellerConfirm(context.Background(), 200, order.ID); appStatus(t, err) != 409 {
+		t.Fatalf("repeat seller confirm: got %d, want 409", appStatus(t, err))
 	}
 }
