@@ -2,7 +2,9 @@ package repository
 
 import (
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
@@ -38,8 +40,16 @@ func (f *fakeSchemaStore) ExecSQL(ddl string) error {
 	}
 	switch ddl {
 	case tradeOrderAddColumnDDL:
+		// MySQL metadata-lock serialisation: a racing loser gets 1060.
+		if f.columnExists {
+			return &mysql.MySQLError{Number: 1060, Message: "Duplicate column name"}
+		}
 		f.columnExists = true
 	case tradeOrderAddIndexDDL:
+		// A racing loser gets 1061; duplicate data would instead yield 1062.
+		if f.indexExists {
+			return &mysql.MySQLError{Number: 1061, Message: "Duplicate key name"}
+		}
 		f.indexExists = true
 	}
 	return nil
@@ -208,5 +218,211 @@ func TestMapTradeOrderCreateError(t *testing.T) {
 	}
 	if got := mapTradeOrderCreateError(nil); got != nil {
 		t.Fatalf("nil -> %v, want nil", got)
+	}
+}
+
+// racingCatalog models several application instances sharing one MySQL
+// catalog. Its mutex plays the role of the table metadata lock that
+// serialises DDL: the first ADD wins and every later ADD fails with
+// 1060/1061, exactly like MySQL reports to the losing instance.
+type racingCatalog struct {
+	mu                             sync.Mutex
+	columnExists                   bool
+	indexExists                    bool
+	indexDDLErr                    *mysql.MySQLError // persistent failure (e.g. 1062 dirty data)
+	createdColumns, createdIndexes int
+}
+
+func (c *racingCatalog) columnPresent() (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.columnExists, nil
+}
+
+func (c *racingCatalog) indexPresent() (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.indexExists, nil
+}
+
+func (c *racingCatalog) exec(ddl string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch ddl {
+	case tradeOrderAddColumnDDL:
+		if c.columnExists {
+			return &mysql.MySQLError{Number: 1060, Message: "Duplicate column name"}
+		}
+		c.columnExists = true
+		c.createdColumns++
+	case tradeOrderAddIndexDDL:
+		if c.indexDDLErr != nil {
+			return c.indexDDLErr
+		}
+		if c.indexExists {
+			return &mysql.MySQLError{Number: 1061, Message: "Duplicate key name"}
+		}
+		c.indexExists = true
+		c.createdIndexes++
+	}
+	return nil
+}
+
+// racingInstance is one application instance; it only forwards to the shared
+// catalog (and records the DDL it attempted, guarded by its own lock).
+type racingInstance struct {
+	shared   *racingCatalog
+	mu       sync.Mutex
+	attempts []string
+}
+
+func (i *racingInstance) ColumnExists(string, string) (bool, error) { return i.shared.columnPresent() }
+func (i *racingInstance) IndexExists(string, string) (bool, error)  { return i.shared.indexPresent() }
+func (i *racingInstance) ExecSQL(ddl string) error {
+	i.mu.Lock()
+	i.attempts = append(i.attempts, ddl)
+	i.mu.Unlock()
+	return i.shared.exec(ddl)
+}
+
+func racingInstances(n int, shared *racingCatalog) []schemaStore {
+	stores := make([]schemaStore, n)
+	for i := range stores {
+		stores[i] = &racingInstance{shared: shared}
+	}
+	return stores
+}
+
+func runEnsureConcurrently(t *testing.T, stores []schemaStore) []error {
+	t.Helper()
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, len(stores))
+	wg.Add(len(stores))
+	for i, st := range stores {
+		go func(i int, st schemaStore) {
+			defer wg.Done()
+			<-start
+			errs[i] = ensureTradeOrderActiveKey(st)
+		}(i, st)
+	}
+	close(start)
+	wg.Wait()
+	return errs
+}
+
+// Multiple instances booting on an empty table: the column and the unique
+// index are each installed exactly once, and no instance exits because
+// another instance won the creation race (1060/1061 losers are tolerated).
+func TestEnsureTradeOrderActiveKeyConcurrentFirstBoot(t *testing.T) {
+	const instances = 8
+	shared := &racingCatalog{}
+	stores := racingInstances(instances, shared)
+
+	errs := runEnsureConcurrently(t, stores)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("instance %d aborted after losing a creation race: %v", i, err)
+		}
+	}
+	if shared.createdColumns != 1 || shared.createdIndexes != 1 {
+		t.Fatalf("column created %d times, index %d times, want 1/1",
+			shared.createdColumns, shared.createdIndexes)
+	}
+	if !shared.columnExists || !shared.indexExists {
+		t.Fatalf("catalog not converged: column=%v index=%v", shared.columnExists, shared.indexExists)
+	}
+
+	// Repeat startup with both objects present: every instance is a no-op.
+	errs = runEnsureConcurrently(t, stores)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("instance %d failed on repeat boot: %v", i, err)
+		}
+	}
+	if shared.createdColumns != 1 || shared.createdIndexes != 1 {
+		t.Fatalf("repeat boot re-created schema objects: columns=%d indexes=%d",
+			shared.createdColumns, shared.createdIndexes)
+	}
+}
+
+// The column is already installed; instances only race the remaining index.
+// It is created exactly once and the 1061 losers still start successfully.
+func TestEnsureTradeOrderActiveKeyConcurrentIndexOnlyRepair(t *testing.T) {
+	const instances = 8
+	shared := &racingCatalog{columnExists: true}
+	stores := racingInstances(instances, shared)
+
+	errs := runEnsureConcurrently(t, stores)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("instance %d aborted on a 1061 index race: %v", i, err)
+		}
+	}
+	if shared.createdColumns != 0 || shared.createdIndexes != 1 {
+		t.Fatalf("columns created=%d want 0; indexes created=%d want 1",
+			shared.createdColumns, shared.createdIndexes)
+	}
+}
+
+// Failure recovery under concurrency: duplicate active orders make the unique
+// index fail with 1062, so every instance must surface the failure and the
+// guard stays absent; after the data is cleaned, the next concurrent boot
+// installs the index exactly once and all instances succeed.
+func TestEnsureTradeOrderActiveKeyConcurrentFailureRecovery(t *testing.T) {
+	const instances = 4
+	shared := &racingCatalog{
+		columnExists: true,
+		indexDDLErr:  &mysql.MySQLError{Number: 1062, Message: "Duplicate entry"},
+	}
+	stores := racingInstances(instances, shared)
+
+	errs := runEnsureConcurrently(t, stores)
+	for i, err := range errs {
+		var mysqlErr *mysql.MySQLError
+		if !errors.As(err, &mysqlErr) || mysqlErr.Number != 1062 {
+			t.Fatalf("instance %d: got %v, want 1062 fatal on dirty data", i, err)
+		}
+	}
+	if shared.indexExists || shared.createdIndexes != 0 {
+		t.Fatalf("index must not exist after failed attempts: exists=%v created=%d",
+			shared.indexExists, shared.createdIndexes)
+	}
+
+	// Data cleaned: the index DDL now succeeds; the concurrent restart converges.
+	shared.indexDDLErr = nil
+	errs = runEnsureConcurrently(t, stores)
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("instance %d after recovery: %v", i, err)
+		}
+	}
+	if !shared.indexExists || shared.createdIndexes != 1 {
+		t.Fatalf("after recovery index exists=%v created=%d, want true/1",
+			shared.indexExists, shared.createdIndexes)
+	}
+}
+
+func TestIsAlreadyExistsDDLError(t *testing.T) {
+	wrapped := fmt.Errorf("alter table: %w", &mysql.MySQLError{Number: 1061})
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "1060 duplicate column", err: &mysql.MySQLError{Number: 1060}, want: true},
+		{name: "1061 duplicate key", err: &mysql.MySQLError{Number: 1061}, want: true},
+		{name: "1062 duplicate value stays fatal", err: &mysql.MySQLError{Number: 1062}, want: false},
+		{name: "1452 other mysql error stays fatal", err: &mysql.MySQLError{Number: 1452}, want: false},
+		{name: "wrapped 1061 still recognised", err: wrapped, want: true},
+		{name: "non mysql error", err: errors.New("boom"), want: false},
+		{name: "nil", err: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAlreadyExistsDDLError(tt.err); got != tt.want {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

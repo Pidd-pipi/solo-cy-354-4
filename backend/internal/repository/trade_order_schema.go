@@ -72,9 +72,16 @@ func (g *gormSchemaStore) ExecSQL(ddl string) error {
 // EnsureTradeOrderActiveKey makes the active-order guard real. The generated
 // column and the unique index are verified and repaired independently: a
 // database may have the column from an earlier partial migration without the
-// index, in which case the index alone is added. It is safe to run repeatedly;
-// existing order rows are not modified (the column is VIRTUAL and the index
-// only reads existing values).
+// index, in which case the index alone is added.
+//
+// It is concurrency-safe for several application instances booting at once:
+// MySQL serialises the DDL via its table metadata lock, so when two instances
+// race to add the column (or index), the winner creates it and the loser's
+// statement fails with 1060/1061 ("already exists"), which is treated as
+// success. A loser therefore converges to the winner's result instead of
+// aborting startup. A 1062 while creating the unique index (pre-existing
+// duplicate active orders) stays fatal. Repeated runs execute nothing, and
+// existing order rows are never modified (VIRTUAL column, index only reads).
 func EnsureTradeOrderActiveKey(db *gorm.DB) error {
 	return ensureTradeOrderActiveKey(&gormSchemaStore{db: db})
 }
@@ -85,7 +92,7 @@ func ensureTradeOrderActiveKey(store schemaStore) error {
 		return err
 	}
 	if !columnExists {
-		if err := store.ExecSQL(tradeOrderAddColumnDDL); err != nil {
+		if err := store.ExecSQL(tradeOrderAddColumnDDL); err != nil && !isAlreadyExistsDDLError(err) {
 			return err
 		}
 	}
@@ -96,12 +103,25 @@ func ensureTradeOrderActiveKey(store schemaStore) error {
 	}
 	if !indexExists {
 		// Adding the unique index fails loudly on pre-existing duplicate
-		// active orders (1062) instead of silently leaving the guard half on.
-		if err := store.ExecSQL(tradeOrderAddIndexDDL); err != nil {
+		// active orders (1062) instead of silently leaving the guard half on;
+		// only a concurrent winner's "key already exists" (1061) is ignored.
+		if err := store.ExecSQL(tradeOrderAddIndexDDL); err != nil && !isAlreadyExistsDDLError(err) {
 			return err
 		}
 	}
 	return nil
+}
+
+// isAlreadyExistsDDLError reports whether a DDL failure only means another
+// instance won the creation race: 1060 duplicate column name or 1061
+// duplicate key name. Other failures (notably 1062 duplicate row value)
+// must not be swallowed.
+func isAlreadyExistsDDLError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1060 || mysqlErr.Number == 1061
+	}
+	return false
 }
 
 // mapTradeOrderCreateError converts a database write failure into a sentinel.
