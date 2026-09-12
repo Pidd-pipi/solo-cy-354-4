@@ -52,7 +52,11 @@ func (s *TradeOrderService) Create(ctx context.Context, buyer *model.User, req *
 	if product.Status != constants.ProductStatusOnSale {
 		return nil, util.NewAppError(409, constants.CodeConflict, constants.MsgProductNotOnSale, nil)
 	}
-	if existing, err := s.orders.FindByProductBuyerStatuses(ctx, req.ProductID, buyer.ID, tradestate.ActiveStatuses()); err == nil && existing != nil {
+	existing, err := s.orders.FindByProductBuyerStatuses(ctx, req.ProductID, buyer.ID, tradestate.ActiveStatuses())
+	if err != nil && !errors.Is(err, util.ErrNotFound) {
+		return nil, util.WrapAppError(fmt.Errorf("trade_order[id=? product=%d buyer=%d] duplicate order lookup: %w", req.ProductID, buyer.ID, err), 500, constants.CodeInternalError, constants.MsgInternalError)
+	}
+	if existing != nil {
 		return nil, util.NewAppError(409, constants.CodeConflict, "您已对该商品下单", nil)
 	}
 	order := &model.TradeOrder{

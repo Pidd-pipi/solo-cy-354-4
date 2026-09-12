@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,8 +16,9 @@ import (
 
 // fakeOrderRepo is an in-memory OrderRepository for lifecycle tests.
 type fakeOrderRepo struct {
-	orders map[uint]*model.TradeOrder
-	nextID uint
+	orders    map[uint]*model.TradeOrder
+	nextID    uint
+	lookupErr error // when non-nil, FindByProductBuyerStatuses fails
 }
 
 func newFakeOrderRepo() *fakeOrderRepo {
@@ -40,6 +42,9 @@ func (f *fakeOrderRepo) FindByID(_ context.Context, id uint) (*model.TradeOrder,
 }
 
 func (f *fakeOrderRepo) FindByProductBuyerStatuses(_ context.Context, productID, buyerID uint, statuses []string) (*model.TradeOrder, error) {
+	if f.lookupErr != nil {
+		return nil, f.lookupErr
+	}
 	for _, o := range f.orders {
 		if o.ProductID != productID || o.BuyerID != buyerID {
 			continue
@@ -127,22 +132,63 @@ func TestTradeOrderCreateLifecycle(t *testing.T) {
 	if order.Status != constants.TradeStatusPending {
 		t.Fatalf("new order status = %q, want pending", order.Status)
 	}
+	if len(orders.orders) != 1 {
+		t.Fatalf("normal create produced %d stored orders, want exactly 1", len(orders.orders))
+	}
 	stored := orders.orders[order.ID]
 	if stored.BuyerConfirmedAt != nil || stored.SellerConfirmedAt != nil || stored.CompletedAt != nil {
 		t.Fatalf("new order must have no confirmation timestamps")
 	}
 
-	// Duplicate active order is rejected.
+	// Duplicate active order is rejected and writes nothing.
+	before := len(orders.orders)
 	if _, err := svc.Create(context.Background(), buyer, &dto.CreateTradeOrderRequest{ProductID: 1}); appStatus(t, err) != 409 {
 		t.Fatalf("duplicate order: got status %d, want 409", appStatus(t, err))
 	}
-	// Buying own product is rejected.
+	if len(orders.orders) != before {
+		t.Fatalf("duplicate create changed order count: %d -> %d", before, len(orders.orders))
+	}
+	// Buying own product is rejected before any lookup/write.
 	if _, err := svc.Create(context.Background(), &model.User{ID: 200}, &dto.CreateTradeOrderRequest{ProductID: 1}); appStatus(t, err) != 400 {
 		t.Fatalf("own product: got %d, want 400", appStatus(t, err))
 	}
 	// Missing product is a 404.
 	if _, err := svc.Create(context.Background(), buyer, &dto.CreateTradeOrderRequest{ProductID: 999}); appStatus(t, err) != 404 {
 		t.Fatalf("missing product: got %d, want 404", appStatus(t, err))
+	}
+	if len(orders.orders) != 1 {
+		t.Fatalf("failed branches created orders: total = %d, want 1", len(orders.orders))
+	}
+}
+
+// A lookup failure during the duplicate check must abort creation with a 500
+// and never insert an order.
+func TestTradeOrderCreateDuplicateLookupFailure(t *testing.T) {
+	svc, orders, _ := newOrderService(t)
+	orders.lookupErr = errors.New("db connection lost")
+
+	before := len(orders.orders)
+	_, err := svc.Create(context.Background(), &model.User{ID: 100}, &dto.CreateTradeOrderRequest{ProductID: 1})
+	if appStatus(t, err) != 500 {
+		t.Fatalf("lookup failure: got status %d, want 500", appStatus(t, err))
+	}
+	if !strings.Contains(err.Error(), "product=1") || !strings.Contains(err.Error(), "buyer=100") {
+		t.Fatalf("error must identify product and buyer for triage, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "db connection lost") {
+		t.Fatalf("error must preserve the underlying cause, got: %v", err)
+	}
+	if len(orders.orders) != before {
+		t.Fatalf("create after lookup failure wrote %d orders, want 0 extra", len(orders.orders)-before)
+	}
+
+	// Once the lookup recovers, normal creation succeeds and writes exactly one.
+	orders.lookupErr = nil
+	if _, err := svc.Create(context.Background(), &model.User{ID: 100}, &dto.CreateTradeOrderRequest{ProductID: 1}); err != nil {
+		t.Fatalf("create after recovery: %v", err)
+	}
+	if len(orders.orders) != 1 {
+		t.Fatalf("recovered create total orders = %d, want exactly 1", len(orders.orders))
 	}
 }
 
