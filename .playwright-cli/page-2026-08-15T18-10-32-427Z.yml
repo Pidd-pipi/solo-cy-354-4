@@ -1,0 +1,45 @@
+- generic [ref=f2e3]:
+  - generic [ref=f2e4]:
+    - generic [ref=f2e5] [cursor=pointer]:
+      - generic [ref=f2e6]: 🎒
+      - generic [ref=f2e7]: 校园二手交易平台
+    - menubar [ref=f2e8]:
+      - menuitem "商品广场" [ref=f2e9] [cursor=pointer]
+      - menuitem "发布商品" [ref=f2e10] [cursor=pointer]
+      - menuitem "私信" [ref=f2e11] [cursor=pointer]
+      - menuitem "我的交易" [ref=f2e12] [cursor=pointer]
+      - menuitem "书籍交换" [ref=f2e13] [cursor=pointer]
+      - menuitem "毕业季专场" [ref=f2e14] [cursor=pointer]
+      - menuitem "个人中心" [ref=f2e15] [cursor=pointer]
+    - generic [ref=f2e16]:
+      - generic [ref=f2e17]: "👤 å°\x8fæ˜Žå\x90Œå¦"
+      - button "退出" [ref=f2e18] [cursor=pointer]
+  - main [ref=f2e20]:
+    - generic [ref=f2e21]:
+      - heading "个人中心" [level=2] [ref=f2e22]
+      - generic [ref=f2e25]:
+        - generic [ref=f2e26]: å
+        - generic [ref=f2e27]:
+          - 'heading "å°æ˜ŽåŒå¦" [level=3] [ref=f2e28]'
+          - paragraph [ref=f2e29]: 13700000001 · 学生 · ä¸œæ ¡åŒº
+        - generic [ref=f2e30]:
+          - generic [ref=f2e31]: 信誉分
+          - generic [ref=f2e32]: "105"
+          - generic [ref=f2e33]: 良好
+      - generic [ref=f2e34]:
+        - generic [ref=f2e35]: ⭐ 收到的评价
+        - generic [ref=f2e38]:
+          - table [ref=f2e40]:
+            - rowgroup [ref=f2e46]:
+              - row [ref=f2e47]:
+                - columnheader "ID" [ref=f2e48]
+                - columnheader "评价" [ref=f2e50]
+                - columnheader "内容" [ref=f2e52]
+                - columnheader "时间" [ref=f2e54]
+          - table [ref=f2e60]:
+            - rowgroup [ref=f2e66]:
+              - row [ref=f2e67]:
+                - cell "1" [ref=f2e68]
+                - cell "好评" [ref=f2e70]
+                - cell "交易很顺利" [ref=f2e74]
+                - cell "2026-08-16 02:09" [ref=f2e76]

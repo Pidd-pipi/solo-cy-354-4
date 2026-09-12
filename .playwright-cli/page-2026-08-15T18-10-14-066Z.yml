@@ -1,0 +1,31 @@
+- generic [ref=f1e3]:
+  - generic [ref=f1e4]:
+    - generic [ref=f1e5] [cursor=pointer]:
+      - generic [ref=f1e6]: 🎒
+      - generic [ref=f1e7]: 校园二手交易平台
+    - menubar [ref=f1e8]:
+      - menuitem "商品广场" [ref=f1e9] [cursor=pointer]
+      - menuitem "发布商品" [ref=f1e10] [cursor=pointer]
+      - menuitem "私信" [ref=f1e11] [cursor=pointer]
+      - menuitem "我的交易" [ref=f1e12] [cursor=pointer]
+      - menuitem "书籍交换" [ref=f1e13] [cursor=pointer]
+      - menuitem "毕业季专场" [ref=f1e14] [cursor=pointer]
+      - menuitem "个人中心" [ref=f1e15] [cursor=pointer]
+    - generic [ref=f1e16]:
+      - button "登录" [ref=f1e17] [cursor=pointer]
+      - button "注册" [ref=f1e19] [cursor=pointer]
+  - main [ref=f1e21]:
+    - generic [ref=f1e24]:
+      - heading "登录" [level=2] [ref=f1e25]
+      - generic [ref=f1e26]:
+        - generic [ref=f1e27]:
+          - generic [ref=f1e28]: 手机号
+          - textbox "手机号" [ref=f1e32]:
+            - /placeholder: 11位手机号
+        - generic [ref=f1e33]:
+          - generic [ref=f1e34]: 密码
+          - textbox "密码" [ref=f1e38]
+      - button "登录" [ref=f1e39] [cursor=pointer]
+      - generic [ref=f1e41]:
+        - text: 还没有账号？
+        - generic [ref=f1e42] [cursor=pointer]: 去注册

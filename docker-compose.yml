@@ -1,0 +1,62 @@
+name: lpcampusmarket
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: ${COMPOSE_PROJECT_NAME:-lpcampusmarket}_db
+    restart: unless-stopped
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:-lpcampusmarket_db}
+      MYSQL_USER: ${DB_USER:-lpcampusmarket_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-lpcampusmarket_pwd}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-lpcampusmarket_root}
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${DB_ROOT_PASSWORD:-lpcampusmarket_root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  backend:
+    build: ./backend
+    container_name: ${COMPOSE_PROJECT_NAME:-lpcampusmarket}_backend
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      DB_DSN: ${DB_USER:-lpcampusmarket_user}:${DB_PASSWORD:-lpcampusmarket_pwd}@tcp(db:3306)/${DB_NAME:-lpcampusmarket_db}?charset=utf8mb4&parseTime=True&loc=Local
+      JWT_SECRET: ${JWT_SECRET:-change_me_to_a_long_random_string}
+      JWT_EXPIRE_HOURS: ${JWT_EXPIRE_HOURS:-72}
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-120}
+      LOGIN_RATE_LIMIT_PER_MIN: ${LOGIN_RATE_LIMIT_PER_MIN:-10}
+      SEEDING_ENABLED: ${SEEDING_ENABLED:-true}
+      CORS_ORIGINS: "*"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${BACKEND_PORT:-29514}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  frontend:
+    build: ./frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-lpcampusmarket}_frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-28514}:80"
+
+volumes:
+  mysql_data:

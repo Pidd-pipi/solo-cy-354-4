@@ -1,0 +1,88 @@
+- generic [ref=f3e3]:
+  - generic [ref=f3e4]:
+    - generic [ref=f3e5] [cursor=pointer]:
+      - generic [ref=f3e6]: 🎒
+      - generic [ref=f3e7]: 校园二手交易平台
+    - menubar [ref=f3e8]:
+      - menuitem "商品广场" [ref=f3e9] [cursor=pointer]
+      - menuitem "发布商品" [ref=f3e10] [cursor=pointer]
+      - menuitem "私信" [ref=f3e11] [cursor=pointer]
+      - menuitem "我的交易" [ref=f3e12] [cursor=pointer]
+      - menuitem "书籍交换" [ref=f3e13] [cursor=pointer]
+      - menuitem "毕业季专场" [ref=f3e14] [cursor=pointer]
+      - menuitem "个人中心" [ref=f3e15] [cursor=pointer]
+    - generic [ref=f3e16]:
+      - generic [ref=f3e17]: "👤 å°\x8fæ˜Žå\x90Œå¦"
+      - button "退出" [ref=f3e18] [cursor=pointer]
+  - main [ref=f3e20]:
+    - generic [ref=f3e21]:
+      - heading "商品广场" [level=2] [ref=f3e22]
+      - generic [ref=f3e23]:
+        - generic [ref=f3e24]:
+          - generic [ref=f3e25]: 分类
+          - generic [ref=f3e28] [cursor=pointer]:
+            - generic:
+              - combobox "分类" [ref=f3e30]
+              - generic [ref=f3e31]: 全部分类
+        - generic [ref=f3e36]:
+          - generic [ref=f3e37]: 校区
+          - textbox "校区" [ref=f3e41]:
+            - /placeholder: 输入校区
+        - generic [ref=f3e43]:
+          - generic [ref=f3e44]: 关键词
+          - textbox "关键词" [ref=f3e48]:
+            - /placeholder: 搜索标题/描述
+        - button "搜索" [ref=f3e52] [cursor=pointer]
+      - generic [ref=f3e54]:
+        - generic [ref=f3e57]:
+          - generic [ref=f3e58]:
+            - heading "é«˜ç‰æ•°å¦ç¬¬å…ç‰ˆ" [level=3] [ref=f3e59]
+            - generic [ref=f3e60]: 已售出
+          - paragraph [ref=f3e62]: "ä¹\x9dæˆ\x90æ–°ï¼Œæœ‰å°‘é‡\x8fç¬”è®°"
+          - generic [ref=f3e63]: ¥15.00
+          - generic [ref=f3e64]:
+            - generic [ref=f3e65]: 书籍
+            - generic [ref=f3e66]: ä¸œæ ¡åŒº
+            - generic [ref=f3e67]: "ä¹\x9dæˆ\x90æ–°"
+          - generic [ref=f3e68]:
+            - button "详情" [ref=f3e69] [cursor=pointer]
+            - button "购买" [disabled] [ref=f3e71]
+        - generic [ref=f3e75]:
+          - generic [ref=f3e76]:
+            - heading "iPad Air 5" [level=3] [ref=f3e77]
+            - generic [ref=f3e78]: 在售
+          - paragraph [ref=f3e80]: 95æ–°ï¼Œå¸¦ç¬”
+          - generic [ref=f3e81]: ¥2800.00
+          - generic [ref=f3e82]:
+            - generic [ref=f3e83]: 电子产品
+            - generic [ref=f3e84]: è¥¿æ ¡åŒº
+            - generic [ref=f3e85]: 95æ–°
+          - generic [ref=f3e86]:
+            - button "详情" [ref=f3e87] [cursor=pointer]
+            - button "购买" [ref=f3e89] [cursor=pointer]
+        - generic [ref=f3e93]:
+          - generic [ref=f3e94]:
+            - 'heading "å®¿èˆå°å°ç¯" [level=3] [ref=f3e95]'
+            - generic [ref=f3e96]: 在售
+          - paragraph [ref=f3e98]: æš–å…‰æŠ¤çœ¼
+          - generic [ref=f3e99]: ¥20.00
+          - generic [ref=f3e100]:
+            - generic [ref=f3e101]: 生活用品
+            - generic [ref=f3e102]: "å\x8d—æ ¡åŒº"
+            - generic [ref=f3e103]: å…¨æ–°
+          - generic [ref=f3e104]:
+            - button "详情" [ref=f3e105] [cursor=pointer]
+            - button "购买" [ref=f3e107] [cursor=pointer]
+        - generic [ref=f3e111]:
+          - generic [ref=f3e112]:
+            - heading "æ¯•ä¸šå£æ£è£…ä¸€å¥—" [level=3] [ref=f3e113]
+            - generic [ref=f3e114]: 在售
+          - paragraph [ref=f3e116]: "Mç \x81 é»‘è‰²è¥¿æœ\x8d"
+          - generic [ref=f3e117]: ¥180.00
+          - generic [ref=f3e118]:
+            - generic [ref=f3e119]: 服饰
+            - generic [ref=f3e120]: ä¸œæ ¡åŒº
+            - generic [ref=f3e121]: "ä¹\x9dæˆ\x90æ–°"
+          - generic [ref=f3e122]:
+            - button "详情" [ref=f3e123] [cursor=pointer]
+            - button "购买" [ref=f3e125] [cursor=pointer]
