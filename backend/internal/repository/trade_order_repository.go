@@ -8,7 +8,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// TradeOrderRepository persists trade order rows.
+// TradeOrderRepository persists trade order rows. It only reads and writes;
+// every allowed status transition and timestamp column is decided by the
+// caller (the trade state rules), never here.
 type TradeOrderRepository struct {
 	db *gorm.DB
 }
@@ -38,11 +40,13 @@ func (r *TradeOrderRepository) FindByID(ctx context.Context, id uint) (*model.Tr
 	return &o, nil
 }
 
-// FindByProductAndBuyer returns an active order of a buyer for a product.
-func (r *TradeOrderRepository) FindByProductAndBuyer(ctx context.Context, productID, buyerID uint) (*model.TradeOrder, error) {
+// FindByProductBuyerStatuses returns a buyer's order for a product whose
+// status is in the given list. Callers pass the statuses they consider a
+// match; the repository holds no opinion on which statuses those are.
+func (r *TradeOrderRepository) FindByProductBuyerStatuses(ctx context.Context, productID, buyerID uint, statuses []string) (*model.TradeOrder, error) {
 	var o model.TradeOrder
 	err := db(ctx, r.db).
-		Where("product_id = ? AND buyer_id = ? AND status IN ?", productID, buyerID, []string{"pending", "confirmed"}).
+		Where("product_id = ? AND buyer_id = ? AND status IN ?", productID, buyerID, statuses).
 		First(&o).Error
 	if err != nil {
 		return nil, normalizeError(err)
@@ -65,40 +69,33 @@ func (r *TradeOrderRepository) ListByUser(ctx context.Context, userID uint, page
 	return items, total, nil
 }
 
-// UpdateStatus sets the order status.
-func (r *TradeOrderRepository) UpdateStatus(ctx context.Context, id uint, status string) error {
-	res := db(ctx, r.db).Model(&model.TradeOrder{}).Where("id = ?", id).Update("status", status)
+// Transition applies an atomic compare-and-set on the order status: it only
+// succeeds while the row still has expectStatus, then writes toStatus and the
+// caller-provided timestamp columns. A 0 RowsAffected means the row vanished
+// (ErrNotFound) or the current status no longer matches expectStatus
+// (ErrConflict); state validation itself lives in the service layer.
+func (r *TradeOrderRepository) Transition(ctx context.Context, id uint, expectStatus, toStatus string, timestampColumns map[string]interface{}) error {
+	updates := mergeStatusUpdates(toStatus, timestampColumns)
+	res := db(ctx, r.db).Model(&model.TradeOrder{}).
+		Where("id = ? AND status = ?", id, expectStatus).
+		Updates(updates)
 	if res.Error != nil {
 		return res.Error
 	}
 	if res.RowsAffected == 0 {
-		return util.ErrNotFound
-	}
-	return nil
-}
-
-// UpdateBuyerConfirmed sets the buyer confirmation timestamp and status.
-func (r *TradeOrderRepository) UpdateBuyerConfirmed(ctx context.Context, id uint, ts interface{}) error {
-	res := db(ctx, r.db).Model(&model.TradeOrder{}).Where("id = ? AND status = ?", id, "pending").
-		Updates(map[string]interface{}{"buyer_confirmed_at": ts, "status": "confirmed"})
-	if res.Error != nil {
-		return res.Error
-	}
-	if res.RowsAffected == 0 {
+		if err := normalizeError(db(ctx, r.db).Select("id").First(&model.TradeOrder{}, id).Error); err != nil {
+			return err
+		}
 		return util.ErrConflict
 	}
 	return nil
 }
 
-// UpdateSellerConfirmed sets the seller confirmation timestamp and completes the order.
-func (r *TradeOrderRepository) UpdateSellerConfirmed(ctx context.Context, id uint, ts interface{}) error {
-	res := db(ctx, r.db).Model(&model.TradeOrder{}).Where("id = ? AND status = ?", id, "confirmed").
-		Updates(map[string]interface{}{"seller_confirmed_at": ts, "completed_at": ts, "status": "completed"})
-	if res.Error != nil {
-		return res.Error
+func mergeStatusUpdates(toStatus string, timestampColumns map[string]interface{}) map[string]interface{} {
+	updates := make(map[string]interface{}, len(timestampColumns)+1)
+	for col, val := range timestampColumns {
+		updates[col] = val
 	}
-	if res.RowsAffected == 0 {
-		return util.ErrConflict
-	}
-	return nil
+	updates["status"] = toStatus
+	return updates
 }
